@@ -4,6 +4,14 @@ CLI tool for [kilonova](https://kilonova.ro). Every submission is saved locally 
 
 ## Install
 
+### Arch-based distros
+
+```
+yay -S kilonova-cli
+# or
+paru -S kilonova-cli
+```
+
 ### Linux / macOS
 
 ```
