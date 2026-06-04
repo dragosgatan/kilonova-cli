@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
 import argparse
+import datetime
 import getpass
 import json
+import math
 import os
 import sys
 import time
@@ -14,6 +16,8 @@ from pathlib import Path
 API_BASE = "https://kilonova.ro/api"
 CONFIG_DIR = Path.home() / ".config" / "kn"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+HISTORY_DIR = Path.home() / ".local" / "share" / "kn"
+HISTORY_FILE = HISTORY_DIR / "submissions.jsonl"
 
 LANG_EXT = {
     ".cpp": "cpp17",
@@ -42,6 +46,50 @@ def save_config(cfg):
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     CONFIG_FILE.write_text(json.dumps(cfg))
     CONFIG_FILE.chmod(0o600)
+
+
+# history
+
+def _load_history():
+    if not HISTORY_FILE.exists():
+        return []
+    records = []
+    for line in HISTORY_FILE.read_text().splitlines():
+        line = line.strip()
+        if line:
+            try:
+                records.append(json.loads(line))
+            except Exception:
+                pass
+    return records
+
+
+def _append_history(record):
+    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+    with HISTORY_FILE.open("a") as f:
+        f.write(json.dumps(record) + "\n")
+
+
+def _record_submission(sub_id, problem_id, sub):
+    subtests = sub.get("subtests") or []
+    total = len(subtests)
+    ok = sum(1 for t in subtests if t.get("verdict") == "translate:success")
+    avg_time_ms = 0.0
+    avg_mem_kb = 0.0
+    if total:
+        avg_time_ms = sum(t.get("time", 0) for t in subtests) / total * 1000
+        avg_mem_kb = sum(t.get("memory", 0) for t in subtests) / total
+    _append_history({
+        "submission_id": sub_id,
+        "problem_id": problem_id,
+        "verdict": sub.get("icpc_verdict") or ("ac" if ok == total and total > 0 else "partial"),
+        "score": sub.get("score", 0),
+        "correct": ok,
+        "wrong": total - ok,
+        "avg_time_ms": round(avg_time_ms, 2),
+        "avg_memory_kb": round(avg_mem_kb, 1),
+        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    })
 
 
 # http helpers
@@ -145,7 +193,7 @@ def _get_submission(sub_id, token):
     return api_call(f"/submissions/getByID?id={sub_id}", token=token)
 
 
-def _poll(sub_id, token):
+def _poll(sub_id, problem_id, token):
     start = time.time()
     while True:
         sub = _get_submission(sub_id, token)
@@ -153,10 +201,169 @@ def _poll(sub_id, token):
         if status == FINISHED_STATUS:
             print("\r" + " " * 30 + "\r", end="", flush=True)
             print_submission(sub)
+            if not sub.get("compile_error"):
+                _record_submission(sub_id, problem_id, sub)
             return
         elapsed = int(time.time() - start)
         print(f"\rwaiting... {elapsed}s", end="", flush=True)
         time.sleep(1)
+
+
+# stats / trends helpers
+
+def _ansi(text, code):
+    return f"\033[{code}m{text}\033[0m"
+
+
+def cmd_stats(_args):
+    records = _load_history()
+    if not records:
+        print("no submissions recorded yet")
+        return
+
+    total = len(records)
+    problems_seen = {}
+    for r in records:
+        pid = r["problem_id"]
+        score = float(r.get("score", 0))
+        ts = r.get("timestamp", "")
+        if pid not in problems_seen:
+            problems_seen[pid] = {"best": score, "attempts": 0, "first": ts}
+        problems_seen[pid]["attempts"] += 1
+        if score > problems_seen[pid]["best"]:
+            problems_seen[pid]["best"] = score
+        if ts < problems_seen[pid]["first"]:
+            problems_seen[pid]["first"] = ts
+
+    unique_problems = len(problems_seen)
+    unique_acs = sum(1 for v in problems_seen.values() if v["best"] >= 100)
+    ac_rate = unique_acs / unique_problems * 100 if unique_problems else 0
+
+    print(f"total submissions : {total}")
+    print(f"problems attempted: {unique_problems}")
+    print(f"problems AC'd     : {unique_acs}")
+    print(f"AC rate           : {ac_rate:.1f}%")
+
+
+def cmd_history(_args):
+    records = _load_history()
+    if not records:
+        print("no submissions recorded yet")
+        return
+
+    problems_seen = {}
+    for r in records:
+        pid = r["problem_id"]
+        score = float(r.get("score", 0))
+        ts = r.get("timestamp", "")
+        if pid not in problems_seen:
+            problems_seen[pid] = {"best": score, "attempts": 0, "first": ts}
+        problems_seen[pid]["attempts"] += 1
+        if score > problems_seen[pid]["best"]:
+            problems_seen[pid]["best"] = score
+        if ts < problems_seen[pid]["first"]:
+            problems_seen[pid]["first"] = ts
+
+    rows = [("problem", "best score", "attempts", "first seen")]
+    for pid, v in sorted(problems_seen.items()):
+        first = v["first"][:10] if v["first"] else "?"
+        rows.append((str(pid), str(v["best"]), str(v["attempts"]), first))
+
+    widths = [max(len(r[i]) for r in rows) for i in range(4)]
+    sep = "  ".join("-" * w for w in widths)
+    for i, row in enumerate(rows):
+        print("  ".join(cell.ljust(w) for cell, w in zip(row, widths)))
+        if i == 0:
+            print(sep)
+
+
+def cmd_trends(_args):
+    records = _load_history()
+
+    today = datetime.date.today()
+    days = 30
+    start = today - datetime.timedelta(days=days - 1)
+
+    day_total = {}
+    day_ac = {}
+    for r in records:
+        ts = r.get("timestamp", "")
+        if not ts:
+            continue
+        try:
+            d = datetime.date.fromisoformat(ts[:10])
+        except ValueError:
+            continue
+        if d < start or d > today:
+            continue
+        day_total[d] = day_total.get(d, 0) + 1
+        if r.get("correct", 0) > 0 and r.get("wrong", 0) == 0:
+            day_ac[d] = day_ac.get(d, 0) + 1
+
+    date_range = [start + datetime.timedelta(days=i) for i in range(days)]
+    counts = [day_total.get(d, 0) for d in date_range]
+    max_count = max(counts) if any(c > 0 for c in counts) else 1
+
+    MAX_HEIGHT = 8
+    BAR_WIDTH = 2
+
+    for row in range(MAX_HEIGHT, 0, -1):
+        if row in (MAX_HEIGHT, MAX_HEIGHT // 2, 1):
+            y_label = f"{round(row * max_count / MAX_HEIGHT):2d}"
+        else:
+            y_label = "  "
+        line = y_label + " │"
+        for i, d in enumerate(date_range):
+            n = counts[i]
+            bar_rows = math.ceil(n * MAX_HEIGHT / max_count) if n > 0 else 0
+            if row <= bar_rows:
+                ch = "█" * BAR_WIDTH
+                if day_ac.get(d, 0) > 0:
+                    line += _ansi(ch, "32")
+                else:
+                    line += _ansi(ch, "31")
+            else:
+                line += " " * BAR_WIDTH
+        print(line)
+
+    print("   └" + "──" * days)
+
+    label_chars = list(" " * (days * BAR_WIDTH))
+    for i in range(0, days, 7):
+        label = date_range[i].strftime("%-d %b")
+        pos = i * BAR_WIDTH
+        for j, c in enumerate(label):
+            if pos + j < len(label_chars):
+                label_chars[pos + j] = c
+    print("    " + "".join(label_chars))
+    print()
+
+    all_active = sorted(d for d, n in day_total.items() if n > 0)
+
+    current_streak = 0
+    if all_active:
+        d = today
+        while d in day_total:
+            current_streak += 1
+            d -= datetime.timedelta(days=1)
+
+    longest_streak = 0
+    run = 0
+    prev_d = None
+    for d in all_active:
+        if prev_d is not None and (d - prev_d).days == 1:
+            run += 1
+        else:
+            run = 1
+        longest_streak = max(longest_streak, run)
+        prev_d = d
+
+    most_active = max(day_total, key=lambda d: day_total[d]) if day_total else None
+
+    print(f"current streak : {current_streak} day{'s' if current_streak != 1 else ''}")
+    print(f"longest streak : {longest_streak} day{'s' if longest_streak != 1 else ''}")
+    if most_active:
+        print(f"most active day: {most_active}  ({day_total[most_active]} submissions)")
 
 
 # commands
@@ -213,7 +420,7 @@ def cmd_submit(args):
     )
 
     print(f"submitted #{sub_id}")
-    _poll(sub_id, token)
+    _poll(sub_id, args.problem_id, token)
 
 
 def cmd_status(args):
@@ -244,6 +451,10 @@ def main():
     p_status = sub.add_parser("status", help="show submission verdict")
     p_status.add_argument("submission_id", type=int, metavar="submission_id")
 
+    sub.add_parser("stats", help="submission history statistics")
+    sub.add_parser("history", help="per-problem breakdown (best score, attempts, first seen)")
+    sub.add_parser("trends", help="bar chart of submissions over the last 30 days")
+
     args = parser.parse_args()
 
     dispatch = {
@@ -251,6 +462,9 @@ def main():
         "logout": cmd_logout,
         "submit": cmd_submit,
         "status": cmd_status,
+        "stats": cmd_stats,
+        "history": cmd_history,
+        "trends": cmd_trends,
     }
 
     try:
