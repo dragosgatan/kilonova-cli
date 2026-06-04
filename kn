@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+
+import argparse
+import getpass
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+API_BASE = "https://kilonova.ro/api"
+CONFIG_DIR = Path.home() / ".config" / "kn"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+
+LANG_EXT = {
+    ".cpp": "cpp17",
+    ".cc": "cpp17",
+    ".cxx": "cpp17",
+    ".c": "c",
+    ".py": "python3",
+    ".pas": "pascal",
+}
+
+FINISHED_STATUS = "finished"
+
+
+# config
+
+def load_config():
+    if CONFIG_FILE.exists():
+        try:
+            return json.loads(CONFIG_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+
+def save_config(cfg):
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_FILE.write_text(json.dumps(cfg))
+    CONFIG_FILE.chmod(0o600)
+
+
+# http helpers
+
+def _build_multipart(fields, files):
+    boundary = ("----KNBound" + str(int(time.time() * 1000))).encode()
+    parts = []
+
+    for name, value in fields.items():
+        parts.append(
+            b"--" + boundary + b"\r\n"
+            b'Content-Disposition: form-data; name="' + name.encode() + b'"\r\n\r\n'
+            + str(value).encode() + b"\r\n"
+        )
+
+    for name, (filename, data) in files.items():
+        parts.append(
+            b"--" + boundary + b"\r\n"
+            b'Content-Disposition: form-data; name="' + name.encode()
+            + b'"; filename="' + filename.encode() + b'"\r\n'
+            b"Content-Type: application/octet-stream\r\n\r\n"
+            + data + b"\r\n"
+        )
+
+    body = b"".join(parts) + b"--" + boundary + b"--\r\n"
+    content_type = "multipart/form-data; boundary=" + boundary.decode()
+    return body, content_type
+
+
+def api_call(path, *, token=None, form=None, files=None, json_body=None, method=None):
+    url = API_BASE + path
+    headers = {"Authorization": token or "guest"}
+    body = None
+
+    if files is not None:
+        body, ct = _build_multipart(form or {}, files)
+        headers["Content-Type"] = ct
+    elif form is not None:
+        body = urllib.parse.urlencode(form).encode()
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    elif json_body is not None:
+        body = json.dumps(json_body).encode()
+        headers["Content-Type"] = "application/json"
+
+    http_method = method or ("POST" if body is not None else "GET")
+    req = urllib.request.Request(url, data=body, headers=headers, method=http_method)
+
+    try:
+        with urllib.request.urlopen(req) as resp:
+            result = json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        try:
+            result = json.loads(e.read())
+        except Exception:
+            raise RuntimeError(f"HTTP {e.code}: {e.reason}")
+
+    if result.get("status") == "error":
+        raise RuntimeError(result.get("data", "unknown error"))
+
+    return result.get("data")
+
+
+# display
+
+def _fmt_table(subtests):
+    rows = [("test", "verdict", "time (s)", "memory (KB)")]
+    for t in sorted(subtests, key=lambda x: x.get("visible_id", 0)):
+        rows.append((
+            str(t.get("visible_id", "?")),
+            t.get("verdict", "?"),
+            f"{t.get('time', 0):.3f}",
+            str(t.get("memory", 0)),
+        ))
+    widths = [max(len(r[i]) for r in rows) for i in range(4)]
+    sep = "  ".join("-" * w for w in widths)
+    lines = []
+    for i, row in enumerate(rows):
+        lines.append("  ".join(cell.ljust(w) for cell, w in zip(row, widths)))
+        if i == 0:
+            lines.append(sep)
+    return "\n".join(lines)
+
+
+def print_submission(sub):
+    if sub.get("compile_error"):
+        print("compile error")
+        msg = sub.get("compile_message") or ""
+        if msg.strip():
+            print(msg.rstrip())
+        return
+
+    score = sub.get("score", "?")
+    icpc = sub.get("icpc_verdict")
+    if icpc:
+        print(f"verdict: {icpc}  score: {score}")
+    else:
+        print(f"score: {score}")
+
+    subtests = sub.get("subtests") or []
+    if subtests:
+        print()
+        print(_fmt_table(subtests))
+
+
+def _get_submission(sub_id, token):
+    return api_call(f"/submissions/getByID?id={sub_id}", token=token)
+
+
+def _poll(sub_id, token):
+    start = time.time()
+    while True:
+        sub = _get_submission(sub_id, token)
+        status = sub.get("status", "")
+        if status == FINISHED_STATUS:
+            print("\r" + " " * 30 + "\r", end="", flush=True)
+            print_submission(sub)
+            return
+        elapsed = int(time.time() - start)
+        print(f"\rwaiting... {elapsed}s", end="", flush=True)
+        time.sleep(1)
+
+
+# commands
+
+def cmd_login(_args):
+    username = input("username: ")
+    password = getpass.getpass("password: ")
+    token = api_call("/auth/login", form={"username": username, "password": password})
+    cfg = load_config()
+    cfg["token"] = token
+    save_config(cfg)
+    print("logged in")
+
+
+def cmd_logout(_args):
+    cfg = load_config()
+    token = cfg.get("token")
+    if not token:
+        print("not logged in", file=sys.stderr)
+        sys.exit(1)
+    api_call("/auth/logout", token=token)
+    cfg.pop("token", None)
+    save_config(cfg)
+    print("logged out")
+
+
+def cmd_submit(args):
+    cfg = load_config()
+    token = cfg.get("token")
+    if not token:
+        print("not logged in", file=sys.stderr)
+        sys.exit(1)
+
+    filepath = Path(args.file)
+    if not filepath.exists():
+        print(f"file not found: {args.file}", file=sys.stderr)
+        sys.exit(1)
+
+    if args.lang:
+        lang = args.lang
+    else:
+        ext = filepath.suffix.lower()
+        lang = LANG_EXT.get(ext)
+        if not lang:
+            print(f"cannot detect language from extension '{ext}'", file=sys.stderr)
+            sys.exit(1)
+
+    code = filepath.read_bytes()
+    sub_id = api_call(
+        "/submissions/submit",
+        token=token,
+        form={"language": lang, "problem_id": args.problem_id},
+        files={"code": (filepath.name, code)},
+    )
+
+    print(f"submitted #{sub_id}")
+    _poll(sub_id, token)
+
+
+def cmd_status(args):
+    cfg = load_config()
+    token = cfg.get("token")
+    sub = _get_submission(args.submission_id, token)
+    status = sub.get("status", "?")
+    if status != FINISHED_STATUS:
+        print(f"status: {status}")
+    else:
+        print_submission(sub)
+
+
+# entry point
+def main():
+    parser = argparse.ArgumentParser(prog="kn", description="kilonova.ro CLI")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("login", help="authenticate and save session token")
+    sub.add_parser("logout", help="invalidate session token")
+
+    p_submit = sub.add_parser("submit", help="submit a solution")
+    p_submit.add_argument("problem_id", type=int, metavar="problem_id")
+    p_submit.add_argument("file", metavar="file")
+    p_submit.add_argument("--lang", metavar="lang",
+                          help="language id (c, cpp11, cpp14, cpp17, cpp20, python3, pascal, rust, java, ...)")
+
+    p_status = sub.add_parser("status", help="show submission verdict")
+    p_status.add_argument("submission_id", type=int, metavar="submission_id")
+
+    args = parser.parse_args()
+
+    dispatch = {
+        "login": cmd_login,
+        "logout": cmd_logout,
+        "submit": cmd_submit,
+        "status": cmd_status,
+    }
+
+    try:
+        dispatch[args.command](args)
+    except RuntimeError as e:
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print()
+        sys.exit(130)
+
+
+if __name__ == "__main__":
+    main()
