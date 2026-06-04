@@ -26,6 +26,12 @@ LANG_EXT = {
     ".c": "c",
     ".py": "python3",
     ".pas": "pascal",
+    ".go": "golang",
+    ".java": "java",
+    ".kt": "kotlin",
+    ".js": "nodejs",
+    ".php": "php",
+    ".rs": "rust",
 }
 
 FINISHED_STATUS = "finished"
@@ -213,6 +219,10 @@ def _poll(sub_id, problem_id, token):
 
 def _ansi(text, code):
     return f"\033[{code}m{text}\033[0m"
+
+
+def cmd_langs(_args):
+    print("c, cpp11, cpp14, cpp17, cpp20, golang, java, kotlin, nodejs, pascal, php, python3, rust")
 
 
 def cmd_stats(_args):
@@ -438,6 +448,7 @@ def main():
     p_submit.add_argument("--lang", metavar="lang",
                           help="language id (c, cpp11, cpp14, cpp17, cpp20, python3, pascal, rust, java, ...)")
 
+    sub.add_parser("langs", help="list available language identifiers")
     sub.add_parser("stats", help="submission history statistics")
     sub.add_parser("history", help="per-problem breakdown (best score, attempts, first seen)")
     sub.add_parser("trends", help="bar chart of submissions over the last 30 days")
@@ -448,6 +459,7 @@ def main():
         "login": cmd_login,
         "logout": cmd_logout,
         "submit": cmd_submit,
+        "langs": cmd_langs,
         "stats": cmd_stats,
         "history": cmd_history,
         "trends": cmd_trends,
