@@ -106,23 +106,18 @@ def api_call(path, *, token=None, form=None, files=None, json_body=None, method=
 
 # display
 
-def _fmt_table(subtests):
-    rows = [("test", "verdict", "time (s)", "memory (KB)")]
-    for t in sorted(subtests, key=lambda x: x.get("visible_id", 0)):
-        rows.append((
-            str(t.get("visible_id", "?")),
-            t.get("verdict", "?"),
-            f"{t.get('time', 0):.3f}",
-            str(t.get("memory", 0)),
-        ))
-    widths = [max(len(r[i]) for r in rows) for i in range(4)]
-    sep = "  ".join("-" * w for w in widths)
-    lines = []
-    for i, row in enumerate(rows):
-        lines.append("  ".join(cell.ljust(w) for cell, w in zip(row, widths)))
-        if i == 0:
-            lines.append(sep)
-    return "\n".join(lines)
+def _fmt_summary(subtests):
+    total = len(subtests)
+    if total == 0:
+        return ""
+    ok = sum(1 for t in subtests if t.get("verdict") == "translate:success")
+    wrong = total - ok
+    avg_time = sum(t.get("time", 0) for t in subtests) / total
+    avg_mem = sum(t.get("memory", 0) for t in subtests) / total
+    return (
+        f"{ok} correct, {wrong} wrong  "
+        f"avg time: {avg_time:.3f}s  avg memory: {avg_mem:.0f} KB"
+    )
 
 
 def print_submission(sub):
@@ -141,9 +136,9 @@ def print_submission(sub):
         print(f"score: {score}")
 
     subtests = sub.get("subtests") or []
-    if subtests:
-        print()
-        print(_fmt_table(subtests))
+    summary = _fmt_summary(subtests)
+    if summary:
+        print(summary)
 
 
 def _get_submission(sub_id, token):
