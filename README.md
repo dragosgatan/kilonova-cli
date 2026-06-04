@@ -1,14 +1,18 @@
 # kilonova-cli
 
-CLI tool for [kilonova](https://kilonova.ro). Uses the public API, auto-detects language from file extension.
+CLI tool for [kilonova](https://kilonova.ro). Every submission is saved locally to `~/.local/share/kn/submissions.jsonl` and used by `kn stats`, `kn history`, and `kn trends`.
 
 ## Install
+
+### Linux / macOS
 
 ```
 git clone https://github.com/dragosgatan/kilonova-cli.git
 cd kilonova-cli
 ./install.sh
 ```
+
+Requires Python 3.
 
 ## Usage
 

@@ -127,7 +127,7 @@ def _build_multipart(fields, files):
 
 def api_call(path, *, token=None, form=None, files=None, json_body=None, method=None):
     url = API_BASE + path
-    headers = {"Authorization": token or "guest"}
+    headers = {"Authorization": token or "guest", "User-Agent": "kilonova-cli/1.0"}
     body = None
 
     if files is not None:
